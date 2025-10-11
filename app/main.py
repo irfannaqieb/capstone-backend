@@ -1,0 +1,122 @@
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.orm import Session
+from . import models, schemas
+from .database import SessionLocal, engine
+import uuid
+import random
+
+app = FastAPI()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@app.post("/session/start")
+def start_session(db: Session = Depends(get_db)):
+    sid = uuid.uuid4()
+    db.add(models.Session(id=sid))
+    db.commit()
+    return {"user_session_id": str(sid)}
+
+
+@app.get("/pairs/next")
+def next_pair(session_id: str, db: Session = Depends(get_db)):
+    try:
+        session_uuid = uuid.UUID(session_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid session_id UUID format: {e}"
+        )
+
+    # Validate session exists
+    session = db.query(models.Session).filter(models.Session.id == session_uuid).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Get next unvoted pair with a DB query (efficient subquery)
+    voted_subquery = (
+        db.query(models.Vote.pair_id)
+        .filter(models.Vote.user_session_id == session_uuid)
+        .subquery()
+    )
+
+    unvoted_pairs = (
+        db.query(models.Pair).filter(~models.Pair.id.in_(voted_subquery)).all()
+    )
+
+    if not unvoted_pairs:
+        # Return done:true when no more pairs to vote on
+        return {"done": True}
+
+    # Pick a random unvoted pair
+    pair = random.choice(unvoted_pairs)
+
+    # Get the prompt text
+    prompt = db.query(models.Prompt).filter(models.Prompt.id == pair.prompt_id).first()
+    if not prompt:
+        raise HTTPException(status_code=500, detail="Prompt not found for pair")
+
+    # Get images using the pair's image_a_id and image_b_id (consistent left/right)
+    left_image = (
+        db.query(models.Image).filter(models.Image.id == pair.image_a_id).first()
+    )
+    right_image = (
+        db.query(models.Image).filter(models.Image.id == pair.image_b_id).first()
+    )
+
+    if not left_image or not right_image:
+        raise HTTPException(status_code=500, detail="Pair images not found")
+
+    return {
+        "done": False,
+        "pair_id": str(pair.id),
+        "prompt_id": pair.prompt_id,
+        "prompt_text": prompt.text,
+        "left": {"url": left_image.url, "model": left_image.model.value},
+        "right": {"url": right_image.url, "model": right_image.model.value},
+    }
+
+
+@app.post("/votes")
+def cast_vote(vote: schemas.VoteCreate, db: Session = Depends(get_db)):
+    # Convert string UUIDs to UUID objects
+    try:
+        session_uuid = uuid.UUID(vote.session_id)
+        pair_uuid = uuid.UUID(vote.pair_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid UUID format: {e}")
+
+    # Convert string enums to SQLAlchemy enums by value (not name)
+    try:
+        winner_enum = models.Winner(vote.winner_model)
+        left_model_enum = models.ModelName(vote.left_model)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid enum value: {e}")
+
+    # Create vote object
+    db_vote = models.Vote(
+        user_session_id=session_uuid,
+        pair_id=pair_uuid,
+        winner_model=winner_enum,
+        left_model=left_model_enum,
+        reaction_time_ms=vote.reaction_time_ms,
+    )
+
+    # Handle unique constraint violation gracefully
+    try:
+        db.add(db_vote)
+        db.commit()
+        return {"ok": True}
+    except Exception as e:
+        db.rollback()
+        # Check if it's a unique constraint violation
+        if "unique constraint" in str(e).lower() or "duplicate" in str(e).lower():
+            raise HTTPException(
+                status_code=409, detail="Vote already exists for this session and pair"
+            )
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
