@@ -59,9 +59,19 @@ def next_pair(session_id: str, db: Session = Depends(get_db)):
         db.query(models.Pair).filter(~models.Pair.id.in_(voted_subquery)).all()
     )
 
+    # Get total pairs count for progress tracking
+    total_pairs = db.query(models.Pair).count()
+    pairs_remaining = len(unvoted_pairs)
+    pairs_completed = total_pairs - pairs_remaining
+
     if not unvoted_pairs:
         # Return done:true when no more pairs to vote on
-        return {"done": True}
+        return {
+            "done": True,
+            "total_pairs": total_pairs,
+            "pairs_completed": pairs_completed,
+            "pairs_remaining": 0
+        }
 
     # Pick a random unvoted pair
     pair = random.choice(unvoted_pairs)
@@ -89,6 +99,9 @@ def next_pair(session_id: str, db: Session = Depends(get_db)):
         "prompt_text": prompt.text,
         "left": {"url": left_image.url, "model": left_image.model.value},
         "right": {"url": right_image.url, "model": right_image.model.value},
+        "total_pairs": total_pairs,
+        "pairs_completed": pairs_completed,
+        "pairs_remaining": pairs_remaining
     }
 
 
