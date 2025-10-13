@@ -29,6 +29,11 @@ def get_db():
         db.close()
 
 
+@app.get("/healthz")
+def health():
+    return {"ok": True}
+
+
 @app.post("/session/start")
 def start_session(db: Session = Depends(get_db)):
     sid = uuid.uuid4()
