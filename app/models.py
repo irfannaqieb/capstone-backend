@@ -70,6 +70,7 @@ class Session(Base):
     __tablename__ = "sessions"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    votes = relationship("Vote", back_populates="session", cascade="all, delete-orphan")
 
 
 class Vote(Base):
@@ -83,6 +84,8 @@ class Vote(Base):
     left_model = Column(Enum(ModelName), nullable=False)
     reaction_time_ms = Column(Integer)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    session = relationship("Session", back_populates="votes")
 
     __table_args__ = (
         UniqueConstraint("user_session_id", "pair_id", name="uq_votes_session_pair"),
