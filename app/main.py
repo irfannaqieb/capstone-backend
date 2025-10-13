@@ -70,7 +70,7 @@ def next_pair(session_id: str, db: Session = Depends(get_db)):
             "done": True,
             "total_pairs": total_pairs,
             "pairs_completed": pairs_completed,
-            "pairs_remaining": 0
+            "pairs_remaining": 0,
         }
 
     # Pick a random unvoted pair
@@ -81,16 +81,18 @@ def next_pair(session_id: str, db: Session = Depends(get_db)):
     if not prompt:
         raise HTTPException(status_code=500, detail="Prompt not found for pair")
 
-    # Get images using the pair's image_a_id and image_b_id (consistent left/right)
-    left_image = (
-        db.query(models.Image).filter(models.Image.id == pair.image_a_id).first()
-    )
-    right_image = (
-        db.query(models.Image).filter(models.Image.id == pair.image_b_id).first()
-    )
+    # Get images for the pair
+    image_a = db.query(models.Image).filter(models.Image.id == pair.image_a_id).first()
+    image_b = db.query(models.Image).filter(models.Image.id == pair.image_b_id).first()
 
-    if not left_image or not right_image:
+    if not image_a or not image_b:
         raise HTTPException(status_code=500, detail="Pair images not found")
+
+    # Randomize left/right positioning to avoid position bias
+    if random.choice([True, False]):
+        left_image, right_image = image_a, image_b
+    else:
+        left_image, right_image = image_b, image_a
 
     return {
         "done": False,
@@ -101,7 +103,7 @@ def next_pair(session_id: str, db: Session = Depends(get_db)):
         "right": {"url": right_image.url, "model": right_image.model.value},
         "total_pairs": total_pairs,
         "pairs_completed": pairs_completed,
-        "pairs_remaining": pairs_remaining
+        "pairs_remaining": pairs_remaining,
     }
 
 
