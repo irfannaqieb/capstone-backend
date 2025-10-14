@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime
 
 
 # ---------- VOTES ----------
@@ -14,6 +15,19 @@ class VoteCreate(BaseModel):
 # ---------- SESSION ----------
 class SessionCreateResponse(BaseModel):
     user_session_id: str
+
+
+class SessionStatusResponse(BaseModel):
+    session_id: str
+    status: str
+    created_at: datetime
+    last_activity: datetime
+    completed_at: Optional[datetime] = None
+    total_votes: int
+    total_pairs: int
+
+    class Config:
+        from_attributes = True
 
 
 # ---------- PAIRS ----------

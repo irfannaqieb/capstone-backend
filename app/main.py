@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import uuid
 import random
+from datetime import datetime, timedelta, timezone
 
 app = FastAPI()
 
@@ -30,6 +31,31 @@ def get_db():
         db.close()
 
 
+def update_session_activity(session: models.Session, db: Session):
+    """Update session activity and check for abandoned status"""
+    now = datetime.now(timezone.utc)
+
+    # Check if session should be marked as abandoned
+    # (24+ hours since last activity, not completed)
+    if session.status == models.SessionStatus.active:
+        time_since_activity = now - session.last_activity.replace(tzinfo=timezone.utc)
+        if time_since_activity > timedelta(hours=24):
+            # Count votes to see if it's incomplete
+            vote_count = (
+                db.query(models.Vote)
+                .filter(models.Vote.user_session_id == session.id)
+                .count()
+            )
+            total_pairs = db.query(models.Pair).count()
+
+            if vote_count < total_pairs:
+                session.status = models.SessionStatus.abandoned
+
+    # Update last activity timestamp
+    session.last_activity = now
+    db.commit()
+
+
 @app.get("/healthz")
 def health():
     return {"ok": True}
@@ -38,7 +64,8 @@ def health():
 @app.post("/session/start")
 def start_session(db: Session = Depends(get_db)):
     sid = uuid.uuid4()
-    db.add(models.Session(id=sid))
+    new_session = models.Session(id=sid, status=models.SessionStatus.active)
+    db.add(new_session)
     db.commit()
     return {"user_session_id": str(sid)}
 
@@ -57,6 +84,9 @@ def next_pair(session_id: str, db: Session = Depends(get_db)):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    # Update activity and check for abandoned status
+    update_session_activity(session, db)
+
     # Get next unvoted pair with a DB query (efficient subquery)
     voted_subquery = (
         db.query(models.Vote.pair_id)
@@ -74,6 +104,12 @@ def next_pair(session_id: str, db: Session = Depends(get_db)):
     pairs_completed = total_pairs - pairs_remaining
 
     if not unvoted_pairs:
+        # Mark session as completed when all pairs are voted
+        if session.status == models.SessionStatus.active:
+            session.status = models.SessionStatus.completed
+            session.completed_at = datetime.now(timezone.utc)
+            db.commit()
+
         # Return done:true when no more pairs to vote on
         return {
             "done": True,
@@ -125,6 +161,13 @@ def cast_vote(vote: schemas.VoteCreate, db: Session = Depends(get_db)):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid UUID format: {e}")
 
+    # Validate session exists and update activity
+    session = db.query(models.Session).filter(models.Session.id == session_uuid).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    update_session_activity(session, db)
+
     # Convert string enums to SQLAlchemy enums by value (not name)
     try:
         winner_enum = models.Winner(vote.winner_model)
@@ -154,3 +197,42 @@ def cast_vote(vote: schemas.VoteCreate, db: Session = Depends(get_db)):
                 status_code=409, detail="Vote already exists for this session and pair"
             )
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.get("/session/{session_id}/status", response_model=schemas.SessionStatusResponse)
+def get_session_status(session_id: str, db: Session = Depends(get_db)):
+    """Get detailed status information about a session"""
+    try:
+        session_uuid = uuid.UUID(session_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid session_id UUID format: {e}"
+        )
+
+    # Get session
+    session = db.query(models.Session).filter(models.Session.id == session_uuid).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Update activity and check for abandoned status
+    update_session_activity(session, db)
+
+    # Get vote count
+    vote_count = (
+        db.query(models.Vote)
+        .filter(models.Vote.user_session_id == session_uuid)
+        .count()
+    )
+
+    # Get total pairs
+    total_pairs = db.query(models.Pair).count()
+
+    return schemas.SessionStatusResponse(
+        session_id=str(session.id),
+        status=session.status.value,
+        created_at=session.created_at,
+        last_activity=session.last_activity,
+        completed_at=session.completed_at,
+        total_votes=vote_count,
+        total_pairs=total_pairs,
+    )

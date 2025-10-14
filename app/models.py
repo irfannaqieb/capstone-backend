@@ -26,6 +26,12 @@ class Winner(enum.Enum):
     tie = "tie"
 
 
+class SessionStatus(enum.Enum):
+    active = "active"
+    completed = "completed"
+    abandoned = "abandoned"
+
+
 MODEL_DISPLAY = {
     "gpt5": "gpt-5",
     "gemini25": "gemini-2.5",
@@ -70,6 +76,11 @@ class Session(Base):
     __tablename__ = "sessions"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_activity = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    status = Column(Enum(SessionStatus), default=SessionStatus.active, nullable=False)
     votes = relationship("Vote", back_populates="session", cascade="all, delete-orphan")
 
 
