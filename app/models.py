@@ -88,7 +88,9 @@ class Vote(Base):
     __tablename__ = "votes"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_session_id = Column(
-        UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
     )
     pair_id = Column(UUID(as_uuid=True), ForeignKey("pairs.id"), nullable=False)
     winner_model = Column(Enum(Winner), nullable=False)
