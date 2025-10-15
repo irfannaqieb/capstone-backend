@@ -149,6 +149,7 @@ def next_pair(session_id: str, db: Session = Depends(get_db)):
         "total_pairs": total_pairs,
         "pairs_completed": pairs_completed,
         "pairs_remaining": pairs_remaining,
+        "voting_options": ["left", "right", "tie"],
     }
 
 

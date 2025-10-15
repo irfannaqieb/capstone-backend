@@ -46,3 +46,4 @@ class PairOut(BaseModel):
     right: Optional[ImageOut] = None
     index: Optional[int] = None
     total: Optional[int] = None
+    voting_options: Optional[list[str]] = None
