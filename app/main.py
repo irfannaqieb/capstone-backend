@@ -46,7 +46,18 @@ def update_session_activity(session: models.Session, db: Session):
                 .filter(models.Vote.user_session_id == session.id)
                 .count()
             )
-            total_pairs = db.query(models.Pair).count()
+
+            # Check if this is a chunked session
+            if session.chunk_id is not None:
+                # Get total pairs in the session's chunk
+                total_pairs = (
+                    db.query(models.ChunkPair)
+                    .filter(models.ChunkPair.chunk_id == session.chunk_id)
+                    .count()
+                )
+            else:
+                # Legacy system - get all pairs
+                total_pairs = db.query(models.Pair).count()
 
             if vote_count < total_pairs:
                 session.status = models.SessionStatus.abandoned
@@ -61,16 +72,52 @@ def health():
     return {"ok": True}
 
 
-@app.post("/session/start")
+def create_random_chunk(db: Session, chunk_size: int = 30):
+    """Create a new chunk with randomly selected pairs"""
+    # Get all available pairs
+    all_pairs = db.query(models.Pair).all()
+
+    if len(all_pairs) < chunk_size:
+        # If we have fewer pairs than chunk size, use all available pairs
+        selected_pairs = all_pairs
+    else:
+        # Randomly select chunk_size pairs
+        selected_pairs = random.sample(all_pairs, chunk_size)
+
+    # Create new chunk
+    new_chunk = models.Chunk()
+    db.add(new_chunk)
+    db.flush()  # Get the chunk ID
+
+    # Add pairs to chunk
+    for pair in selected_pairs:
+        chunk_pair = models.ChunkPair(chunk_id=new_chunk.id, pair_id=pair.id)
+        db.add(chunk_pair)
+
+    db.commit()
+    return new_chunk
+
+
+@app.post("/session/start", response_model=schemas.SessionCreateResponse)
 def start_session(db: Session = Depends(get_db)):
     sid = uuid.uuid4()
-    new_session = models.Session(id=sid, status=models.SessionStatus.active)
+
+    # Create a random chunk for this session
+    chunk = create_random_chunk(db)
+
+    # Create session with chunk assignment
+    new_session = models.Session(
+        id=sid, status=models.SessionStatus.active, chunk_id=chunk.id
+    )
     db.add(new_session)
     db.commit()
-    return {"user_session_id": str(sid)}
+
+    return schemas.SessionCreateResponse(
+        user_session_id=str(sid), chunk_id=str(chunk.id)
+    )
 
 
-@app.get("/pairs/next")
+@app.get("/pairs/next", response_model=schemas.PairOut)
 def next_pair(session_id: str, db: Session = Depends(get_db)):
     try:
         session_uuid = uuid.UUID(session_id)
@@ -87,21 +134,60 @@ def next_pair(session_id: str, db: Session = Depends(get_db)):
     # Update activity and check for abandoned status
     update_session_activity(session, db)
 
-    # Get next unvoted pair with a DB query (efficient subquery)
-    voted_subquery = (
-        db.query(models.Vote.pair_id)
-        .filter(models.Vote.user_session_id == session_uuid)
-        .subquery()
-    )
+    # Check if this is a chunked session (new system) or legacy session
+    is_chunked = session.chunk_id is not None
 
-    unvoted_pairs = (
-        db.query(models.Pair).filter(~models.Pair.id.in_(voted_subquery)).all()
-    )
+    if is_chunked:
+        # NEW CHUNKED SYSTEM
+        # Get pairs in this session's chunk
+        chunk_pair_ids = (
+            db.query(models.ChunkPair.pair_id)
+            .filter(models.ChunkPair.chunk_id == session.chunk_id)
+            .subquery()
+        )
 
-    # Get total pairs count for progress tracking
-    total_pairs = db.query(models.Pair).count()
-    pairs_remaining = len(unvoted_pairs)
-    pairs_completed = total_pairs - pairs_remaining
+        # Get voted pairs in this chunk
+        voted_subquery = (
+            db.query(models.Vote.pair_id)
+            .filter(models.Vote.user_session_id == session_uuid)
+            .subquery()
+        )
+
+        # Get unvoted pairs within the chunk
+        unvoted_pairs = (
+            db.query(models.Pair)
+            .filter(models.Pair.id.in_(chunk_pair_ids))
+            .filter(~models.Pair.id.in_(voted_subquery))
+            .all()
+        )
+
+        # Get total pairs in chunk for progress tracking
+        total_pairs_in_chunk = (
+            db.query(models.ChunkPair)
+            .filter(models.ChunkPair.chunk_id == session.chunk_id)
+            .count()
+        )
+
+        pairs_remaining = len(unvoted_pairs)
+        pairs_completed = total_pairs_in_chunk - pairs_remaining
+
+    else:
+        # LEGACY SYSTEM (backward compatibility)
+        # Get next unvoted pair with a DB query (efficient subquery)
+        voted_subquery = (
+            db.query(models.Vote.pair_id)
+            .filter(models.Vote.user_session_id == session_uuid)
+            .subquery()
+        )
+
+        unvoted_pairs = (
+            db.query(models.Pair).filter(~models.Pair.id.in_(voted_subquery)).all()
+        )
+
+        # Get total pairs count for progress tracking
+        total_pairs_in_chunk = db.query(models.Pair).count()
+        pairs_remaining = len(unvoted_pairs)
+        pairs_completed = total_pairs_in_chunk - pairs_remaining
 
     if not unvoted_pairs:
         # Mark session as completed when all pairs are voted
@@ -111,12 +197,13 @@ def next_pair(session_id: str, db: Session = Depends(get_db)):
             db.commit()
 
         # Return done:true when no more pairs to vote on
-        return {
-            "done": True,
-            "total_pairs": total_pairs,
-            "pairs_completed": pairs_completed,
-            "pairs_remaining": 0,
-        }
+        return schemas.PairOut(
+            done=True,
+            total=total_pairs_in_chunk,
+            index=pairs_completed,
+            chunk_id=str(session.chunk_id) if is_chunked else None,
+            is_chunked=is_chunked,
+        )
 
     # Pick a random unvoted pair
     pair = random.choice(unvoted_pairs)
@@ -139,18 +226,27 @@ def next_pair(session_id: str, db: Session = Depends(get_db)):
     else:
         left_image, right_image = image_b, image_a
 
-    return {
-        "done": False,
-        "pair_id": str(pair.id),
-        "prompt_id": pair.prompt_id,
-        "prompt_text": prompt.text,
-        "left": {"url": left_image.url, "model": left_image.model.value},
-        "right": {"url": right_image.url, "model": right_image.model.value},
-        "total_pairs": total_pairs,
-        "pairs_completed": pairs_completed,
-        "pairs_remaining": pairs_remaining,
-        "voting_options": ["left", "right", "tie"],
-    }
+    return schemas.PairOut(
+        done=False,
+        pair_id=str(pair.id),
+        prompt_id=pair.prompt_id,
+        prompt_text=prompt.text,
+        left=schemas.ImageOut(
+            image_id=str(left_image.id),
+            url=left_image.url,
+            model=left_image.model.value,
+        ),
+        right=schemas.ImageOut(
+            image_id=str(right_image.id),
+            url=right_image.url,
+            model=right_image.model.value,
+        ),
+        total=total_pairs_in_chunk,
+        index=pairs_completed + 1,  # Current pair index (1-based)
+        voting_options=["left", "right", "tie"],
+        chunk_id=str(session.chunk_id) if is_chunked else None,
+        is_chunked=is_chunked,
+    )
 
 
 @app.post("/votes")
@@ -225,8 +321,19 @@ def get_session_status(session_id: str, db: Session = Depends(get_db)):
         .count()
     )
 
-    # Get total pairs
-    total_pairs = db.query(models.Pair).count()
+    # Check if this is a chunked session
+    is_chunked = session.chunk_id is not None
+
+    if is_chunked:
+        # Get total pairs in the session's chunk
+        total_pairs = (
+            db.query(models.ChunkPair)
+            .filter(models.ChunkPair.chunk_id == session.chunk_id)
+            .count()
+        )
+    else:
+        # Legacy system - get all pairs
+        total_pairs = db.query(models.Pair).count()
 
     return schemas.SessionStatusResponse(
         session_id=str(session.id),
@@ -236,4 +343,6 @@ def get_session_status(session_id: str, db: Session = Depends(get_db)):
         completed_at=session.completed_at,
         total_votes=vote_count,
         total_pairs=total_pairs,
+        chunk_id=str(session.chunk_id) if is_chunked else None,
+        is_chunked=is_chunked,
     )

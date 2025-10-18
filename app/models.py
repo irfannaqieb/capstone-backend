@@ -72,6 +72,37 @@ class Pair(Base):
     __table_args__ = (UniqueConstraint("prompt_id", name="uq_pairs_prompt"),)
 
 
+class Chunk(Base):
+    __tablename__ = "chunks"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    sessions = relationship("Session", back_populates="chunk")
+    chunk_pairs = relationship(
+        "ChunkPair", back_populates="chunk", cascade="all, delete-orphan"
+    )
+
+
+class ChunkPair(Base):
+    __tablename__ = "chunk_pairs"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    chunk_id = Column(
+        UUID(as_uuid=True), ForeignKey("chunks.id", ondelete="CASCADE"), nullable=False
+    )
+    pair_id = Column(
+        UUID(as_uuid=True), ForeignKey("pairs.id", ondelete="CASCADE"), nullable=False
+    )
+
+    # Relationships
+    chunk = relationship("Chunk", back_populates="chunk_pairs")
+    pair = relationship("Pair")
+
+    __table_args__ = (
+        UniqueConstraint("chunk_id", "pair_id", name="uq_chunk_pairs_chunk_pair"),
+    )
+
+
 class Session(Base):
     __tablename__ = "sessions"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -81,7 +112,13 @@ class Session(Base):
     )
     completed_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(Enum(SessionStatus), default=SessionStatus.active, nullable=False)
+    chunk_id = Column(
+        UUID(as_uuid=True), ForeignKey("chunks.id"), nullable=True
+    )  # Nullable for backward compatibility
+
+    # Relationships
     votes = relationship("Vote", back_populates="session", cascade="all, delete-orphan")
+    chunk = relationship("Chunk", back_populates="sessions")
 
 
 class Vote(Base):

@@ -15,6 +15,7 @@ class VoteCreate(BaseModel):
 # ---------- SESSION ----------
 class SessionCreateResponse(BaseModel):
     user_session_id: str
+    chunk_id: Optional[str] = None  # For new chunked sessions
 
 
 class SessionStatusResponse(BaseModel):
@@ -25,6 +26,8 @@ class SessionStatusResponse(BaseModel):
     completed_at: Optional[datetime] = None
     total_votes: int
     total_pairs: int
+    chunk_id: Optional[str] = None  # For chunked sessions
+    is_chunked: bool = False  # Indicates if this is a chunked session
 
     class Config:
         from_attributes = True
@@ -47,3 +50,5 @@ class PairOut(BaseModel):
     index: Optional[int] = None
     total: Optional[int] = None
     voting_options: Optional[list[str]] = None
+    chunk_id: Optional[str] = None  # For chunked sessions
+    is_chunked: bool = False  # Indicates if this is from a chunked session
