@@ -18,11 +18,17 @@ import enum
 class ModelName(enum.Enum):
     gpt5 = "gpt5"
     gemini25 = "gemini25"
+    flux1_dev = "flux1_dev"
+    flux1_krea = "flux1_krea"
+    kolors = "kolors"
 
 
 class Winner(enum.Enum):
     gpt5 = "gpt5"
     gemini25 = "gemini25"
+    flux1_dev = "flux1_dev"
+    flux1_krea = "flux1_krea"
+    kolors = "kolors"
     tie = "tie"
 
 
@@ -35,6 +41,9 @@ class SessionStatus(enum.Enum):
 MODEL_DISPLAY = {
     "gpt5": "gpt-5",
     "gemini25": "gemini-2.5",
+    "flux1_dev": "Flux.1 Dev",
+    "flux1_krea": "Flux.1 Krea",
+    "kolors": "Kolors",
 }
 
 
@@ -59,19 +68,6 @@ class Image(Base):
     )
 
 
-class Pair(Base):
-    __tablename__ = "pairs"
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    prompt_id = Column(String, ForeignKey("prompts.id"))
-    image_a_id = Column(UUID(as_uuid=True), ForeignKey("images.id"), nullable=False)
-    image_b_id = Column(UUID(as_uuid=True), ForeignKey("images.id"), nullable=False)
-
-    image_a = relationship("Image", foreign_keys=[image_a_id])
-    image_b = relationship("Image", foreign_keys=[image_b_id])
-
-    __table_args__ = (UniqueConstraint("prompt_id", name="uq_pairs_prompt"),)
-
-
 class Chunk(Base):
     __tablename__ = "chunks"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -79,27 +75,27 @@ class Chunk(Base):
 
     # Relationships
     sessions = relationship("Session", back_populates="chunk")
-    chunk_pairs = relationship(
-        "ChunkPair", back_populates="chunk", cascade="all, delete-orphan"
+    chunk_prompts = relationship(
+        "ChunkPrompt", back_populates="chunk", cascade="all, delete-orphan"
     )
 
 
-class ChunkPair(Base):
-    __tablename__ = "chunk_pairs"
+class ChunkPrompt(Base):
+    __tablename__ = "chunk_prompts"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     chunk_id = Column(
         UUID(as_uuid=True), ForeignKey("chunks.id", ondelete="CASCADE"), nullable=False
     )
-    pair_id = Column(
-        UUID(as_uuid=True), ForeignKey("pairs.id", ondelete="CASCADE"), nullable=False
+    prompt_id = Column(
+        String, ForeignKey("prompts.id", ondelete="CASCADE"), nullable=False
     )
 
     # Relationships
-    chunk = relationship("Chunk", back_populates="chunk_pairs")
-    pair = relationship("Pair")
+    chunk = relationship("Chunk", back_populates="chunk_prompts")
+    prompt = relationship("Prompt")
 
     __table_args__ = (
-        UniqueConstraint("chunk_id", "pair_id", name="uq_chunk_pairs_chunk_pair"),
+        UniqueConstraint("chunk_id", "prompt_id", name="uq_chunk_prompts_chunk_prompt"),
     )
 
 
@@ -129,14 +125,14 @@ class Vote(Base):
         ForeignKey("sessions.id", ondelete="CASCADE"),
         nullable=False,
     )
-    pair_id = Column(UUID(as_uuid=True), ForeignKey("pairs.id"), nullable=False)
+    prompt_id = Column(String, ForeignKey("prompts.id"), nullable=False)
     winner_model = Column(Enum(Winner), nullable=False)
-    left_model = Column(Enum(ModelName), nullable=False)
     reaction_time_ms = Column(Integer)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     session = relationship("Session", back_populates="votes")
+    prompt = relationship("Prompt")
 
     __table_args__ = (
-        UniqueConstraint("user_session_id", "pair_id", name="uq_votes_session_pair"),
+        UniqueConstraint("user_session_id", "prompt_id", name="uq_votes_session_prompt"),
     )

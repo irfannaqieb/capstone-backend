@@ -47,19 +47,14 @@ def update_session_activity(session: models.Session, db: Session):
                 .count()
             )
 
-            # Check if this is a chunked session
-            if session.chunk_id is not None:
-                # Get total pairs in the session's chunk
-                total_pairs = (
-                    db.query(models.ChunkPair)
-                    .filter(models.ChunkPair.chunk_id == session.chunk_id)
-                    .count()
-                )
-            else:
-                # Legacy system - get all pairs
-                total_pairs = db.query(models.Pair).count()
+            # Get total prompts in the session's chunk
+            total_prompts = (
+                db.query(models.ChunkPrompt)
+                .filter(models.ChunkPrompt.chunk_id == session.chunk_id)
+                .count()
+            )
 
-            if vote_count < total_pairs:
+            if vote_count < total_prompts:
                 session.status = models.SessionStatus.abandoned
 
     # Update last activity timestamp
@@ -73,26 +68,29 @@ def health():
 
 
 def create_random_chunk(db: Session, chunk_size: int = 30):
-    """Create a new chunk with randomly selected pairs"""
-    # Get all available pairs
-    all_pairs = db.query(models.Pair).all()
+    """Create a new chunk with randomly selected prompts"""
+    # Get all available prompts
+    all_prompts = db.query(models.Prompt).all()
 
-    if len(all_pairs) < chunk_size:
-        # If we have fewer pairs than chunk size, use all available pairs
-        selected_pairs = all_pairs
+    if len(all_prompts) < chunk_size:
+        # If we have fewer prompts than chunk size, use all available prompts
+        selected_prompts = all_prompts
     else:
-        # Randomly select chunk_size pairs
-        selected_pairs = random.sample(all_pairs, chunk_size)
+        # Randomly select chunk_size prompts
+        selected_prompts = random.sample(all_prompts, chunk_size)
 
     # Create new chunk
     new_chunk = models.Chunk()
     db.add(new_chunk)
     db.flush()  # Get the chunk ID
 
-    # Add pairs to chunk
-    for pair in selected_pairs:
-        chunk_pair = models.ChunkPair(chunk_id=new_chunk.id, pair_id=pair.id)
-        db.add(chunk_pair)
+    # Add prompts to chunk
+    for prompt in selected_prompts:
+        chunk_prompt = models.ChunkPrompt(
+            chunk_id=new_chunk.id, 
+            prompt_id=prompt.id
+        )
+        db.add(chunk_prompt)
 
     db.commit()
     return new_chunk
@@ -117,8 +115,8 @@ def start_session(db: Session = Depends(get_db)):
     )
 
 
-@app.get("/pairs/next", response_model=schemas.PairOut)
-def next_pair(session_id: str, db: Session = Depends(get_db)):
+@app.get("/prompts/next", response_model=schemas.PromptOut)
+def next_prompt(session_id: str, db: Session = Depends(get_db)):
     try:
         session_uuid = uuid.UUID(session_id)
     except ValueError as e:
@@ -134,127 +132,101 @@ def next_pair(session_id: str, db: Session = Depends(get_db)):
     # Update activity and check for abandoned status
     update_session_activity(session, db)
 
-    # Check if this is a chunked session (new system) or legacy session
-    is_chunked = session.chunk_id is not None
+    # Validate chunk exists
+    if not session.chunk_id:
+        raise HTTPException(status_code=500, detail="Session has no chunk assigned")
 
-    if is_chunked:
-        # NEW CHUNKED SYSTEM
-        # Get pairs in this session's chunk
-        chunk_pair_ids = (
-            db.query(models.ChunkPair.pair_id)
-            .filter(models.ChunkPair.chunk_id == session.chunk_id)
-            .subquery()
-        )
+    # Get prompt IDs in this session's chunk
+    chunk_prompt_ids = (
+        db.query(models.ChunkPrompt.prompt_id)
+        .filter(models.ChunkPrompt.chunk_id == session.chunk_id)
+        .subquery()
+    )
 
-        # Get voted pairs in this chunk
-        voted_subquery = (
-            db.query(models.Vote.pair_id)
-            .filter(models.Vote.user_session_id == session_uuid)
-            .subquery()
-        )
+    # Get voted prompt IDs in this session
+    voted_prompt_ids = (
+        db.query(models.Vote.prompt_id)
+        .filter(models.Vote.user_session_id == session_uuid)
+        .subquery()
+    )
 
-        # Get unvoted pairs within the chunk
-        unvoted_pairs = (
-            db.query(models.Pair)
-            .filter(models.Pair.id.in_(chunk_pair_ids))
-            .filter(~models.Pair.id.in_(voted_subquery))
-            .all()
-        )
+    # Get unvoted prompts within the chunk
+    unvoted_prompts = (
+        db.query(models.Prompt)
+        .filter(models.Prompt.id.in_(chunk_prompt_ids))
+        .filter(~models.Prompt.id.in_(voted_prompt_ids))
+        .all()
+    )
 
-        # Get total pairs in chunk for progress tracking
-        total_pairs_in_chunk = (
-            db.query(models.ChunkPair)
-            .filter(models.ChunkPair.chunk_id == session.chunk_id)
-            .count()
-        )
+    # Get total prompts in chunk for progress tracking
+    total_prompts_in_chunk = (
+        db.query(models.ChunkPrompt)
+        .filter(models.ChunkPrompt.chunk_id == session.chunk_id)
+        .count()
+    )
 
-        pairs_remaining = len(unvoted_pairs)
-        pairs_completed = total_pairs_in_chunk - pairs_remaining
+    prompts_completed = total_prompts_in_chunk - len(unvoted_prompts)
 
-    else:
-        # LEGACY SYSTEM (backward compatibility)
-        # Get next unvoted pair with a DB query (efficient subquery)
-        voted_subquery = (
-            db.query(models.Vote.pair_id)
-            .filter(models.Vote.user_session_id == session_uuid)
-            .subquery()
-        )
-
-        unvoted_pairs = (
-            db.query(models.Pair).filter(~models.Pair.id.in_(voted_subquery)).all()
-        )
-
-        # Get total pairs count for progress tracking
-        total_pairs_in_chunk = db.query(models.Pair).count()
-        pairs_remaining = len(unvoted_pairs)
-        pairs_completed = total_pairs_in_chunk - pairs_remaining
-
-    if not unvoted_pairs:
-        # Mark session as completed when all pairs are voted
+    if not unvoted_prompts:
+        # Mark session as completed when all prompts are voted
         if session.status == models.SessionStatus.active:
             session.status = models.SessionStatus.completed
             session.completed_at = datetime.now(timezone.utc)
             db.commit()
 
-        # Return done:true when no more pairs to vote on
-        return schemas.PairOut(
+        # Return done:true when no more prompts to vote on
+        return schemas.PromptOut(
             done=True,
-            total=total_pairs_in_chunk,
-            index=pairs_completed,
-            chunk_id=str(session.chunk_id) if is_chunked else None,
-            is_chunked=is_chunked,
+            total=total_prompts_in_chunk,
+            index=prompts_completed,
+            chunk_id=str(session.chunk_id),
         )
 
-    # Pick a random unvoted pair
-    pair = random.choice(unvoted_pairs)
+    # Pick a random unvoted prompt
+    prompt = random.choice(unvoted_prompts)
 
-    # Get the prompt text
-    prompt = db.query(models.Prompt).filter(models.Prompt.id == pair.prompt_id).first()
-    if not prompt:
-        raise HTTPException(status_code=500, detail="Prompt not found for pair")
+    # Get all images for this prompt (should be 5)
+    images = (
+        db.query(models.Image)
+        .filter(models.Image.prompt_id == prompt.id)
+        .all()
+    )
 
-    # Get images for the pair
-    image_a = db.query(models.Image).filter(models.Image.id == pair.image_a_id).first()
-    image_b = db.query(models.Image).filter(models.Image.id == pair.image_b_id).first()
+    if len(images) != 5:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Prompt {prompt.id} has {len(images)} images, expected 5"
+        )
 
-    if not image_a or not image_b:
-        raise HTTPException(status_code=500, detail="Pair images not found")
+    # Randomize image order to avoid position bias
+    random.shuffle(images)
 
-    # Randomize left/right positioning to avoid position bias
-    if random.choice([True, False]):
-        left_image, right_image = image_a, image_b
-    else:
-        left_image, right_image = image_b, image_a
+    # Convert to schema
+    image_outs = [
+        schemas.ImageOut(
+            image_id=str(img.id),
+            url=img.url,
+            model=img.model.value,
+        )
+        for img in images
+    ]
 
-    return schemas.PairOut(
+    return schemas.PromptOut(
         done=False,
-        pair_id=str(pair.id),
-        prompt_id=pair.prompt_id,
+        prompt_id=prompt.id,
         prompt_text=prompt.text,
-        left=schemas.ImageOut(
-            image_id=str(left_image.id),
-            url=left_image.url,
-            model=left_image.model.value,
-        ),
-        right=schemas.ImageOut(
-            image_id=str(right_image.id),
-            url=right_image.url,
-            model=right_image.model.value,
-        ),
-        total=total_pairs_in_chunk,
-        index=pairs_completed + 1,  # Current pair index (1-based)
-        voting_options=["left", "right", "tie"],
-        chunk_id=str(session.chunk_id) if is_chunked else None,
-        is_chunked=is_chunked,
+        images=image_outs,
+        total=total_prompts_in_chunk,
+        index=prompts_completed + 1,  # Current prompt index (1-based)
+        chunk_id=str(session.chunk_id),
     )
 
 
 @app.post("/votes")
 def cast_vote(vote: schemas.VoteCreate, db: Session = Depends(get_db)):
-    # Convert string UUIDs to UUID objects
+    # Convert string UUID to UUID object
     try:
         session_uuid = uuid.UUID(vote.session_id)
-        pair_uuid = uuid.UUID(vote.pair_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid UUID format: {e}")
 
@@ -265,19 +237,22 @@ def cast_vote(vote: schemas.VoteCreate, db: Session = Depends(get_db)):
 
     update_session_activity(session, db)
 
-    # Convert string enums to SQLAlchemy enums by value (not name)
+    # Convert string enum to SQLAlchemy enum by value
     try:
         winner_enum = models.Winner(vote.winner_model)
-        left_model_enum = models.ModelName(vote.left_model)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid enum value: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid winner_model enum value: {e}")
+
+    # Validate prompt exists
+    prompt = db.query(models.Prompt).filter(models.Prompt.id == vote.prompt_id).first()
+    if not prompt:
+        raise HTTPException(status_code=404, detail="Prompt not found")
 
     # Create vote object
     db_vote = models.Vote(
         user_session_id=session_uuid,
-        pair_id=pair_uuid,
+        prompt_id=vote.prompt_id,
         winner_model=winner_enum,
-        left_model=left_model_enum,
         reaction_time_ms=vote.reaction_time_ms,
     )
 
@@ -291,7 +266,7 @@ def cast_vote(vote: schemas.VoteCreate, db: Session = Depends(get_db)):
         # Check if it's a unique constraint violation
         if "unique constraint" in str(e).lower() or "duplicate" in str(e).lower():
             raise HTTPException(
-                status_code=409, detail="Vote already exists for this session and pair"
+                status_code=409, detail="Vote already exists for this session and prompt"
             )
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
@@ -321,19 +296,12 @@ def get_session_status(session_id: str, db: Session = Depends(get_db)):
         .count()
     )
 
-    # Check if this is a chunked session
-    is_chunked = session.chunk_id is not None
-
-    if is_chunked:
-        # Get total pairs in the session's chunk
-        total_pairs = (
-            db.query(models.ChunkPair)
-            .filter(models.ChunkPair.chunk_id == session.chunk_id)
-            .count()
-        )
-    else:
-        # Legacy system - get all pairs
-        total_pairs = db.query(models.Pair).count()
+    # Get total prompts in the session's chunk
+    total_prompts = (
+        db.query(models.ChunkPrompt)
+        .filter(models.ChunkPrompt.chunk_id == session.chunk_id)
+        .count()
+    )
 
     return schemas.SessionStatusResponse(
         session_id=str(session.id),
@@ -342,7 +310,6 @@ def get_session_status(session_id: str, db: Session = Depends(get_db)):
         last_activity=session.last_activity,
         completed_at=session.completed_at,
         total_votes=vote_count,
-        total_pairs=total_pairs,
-        chunk_id=str(session.chunk_id) if is_chunked else None,
-        is_chunked=is_chunked,
+        total_prompts=total_prompts,
+        chunk_id=str(session.chunk_id),
     )

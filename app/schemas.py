@@ -6,9 +6,8 @@ from datetime import datetime
 # ---------- VOTES ----------
 class VoteCreate(BaseModel):
     session_id: str
-    pair_id: str
+    prompt_id: str
     winner_model: str
-    left_model: str
     reaction_time_ms: Optional[int] = None
 
 
@@ -25,30 +24,25 @@ class SessionStatusResponse(BaseModel):
     last_activity: datetime
     completed_at: Optional[datetime] = None
     total_votes: int
-    total_pairs: int
-    chunk_id: Optional[str] = None  # For chunked sessions
-    is_chunked: bool = False  # Indicates if this is a chunked session
+    total_prompts: int
+    chunk_id: Optional[str] = None
 
     class Config:
         from_attributes = True
 
 
-# ---------- PAIRS ----------
+# ---------- PROMPTS ----------
 class ImageOut(BaseModel):
     image_id: str
     url: str
     model: str
 
 
-class PairOut(BaseModel):
+class PromptOut(BaseModel):
     done: bool
-    pair_id: Optional[str] = None
     prompt_id: Optional[str] = None
     prompt_text: Optional[str] = None
-    left: Optional[ImageOut] = None
-    right: Optional[ImageOut] = None
-    index: Optional[int] = None
-    total: Optional[int] = None
-    voting_options: Optional[list[str]] = None
-    chunk_id: Optional[str] = None  # For chunked sessions
-    is_chunked: bool = False  # Indicates if this is from a chunked session
+    images: Optional[list[ImageOut]] = None  # All 5 images
+    index: Optional[int] = None  # Current progress (e.g., 15/30)
+    total: Optional[int] = None  # Total prompts in chunk (30)
+    chunk_id: Optional[str] = None
