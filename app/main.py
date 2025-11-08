@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from . import models, schemas
 from .database import SessionLocal, engine
 from fastapi.middleware.cors import CORSMiddleware
@@ -69,28 +70,30 @@ def health():
 
 def create_random_chunk(db: Session, chunk_size: int = 30):
     """Create a new chunk with randomly selected prompts"""
-    # Get all available prompts
-    all_prompts = db.query(models.Prompt).all()
 
-    if len(all_prompts) < chunk_size:
+    # Get total count first
+    total_count = db.query(func.count(models.Prompt.id)).scalar()
+
+    if total_count <= chunk_size:
         # If we have fewer prompts than chunk size, use all available prompts
-        selected_prompts = all_prompts
+        selected_prompt_ids = [p.id for p in db.query(models.Prompt.id).all()]
     else:
-        # Randomly select chunk_size prompts
-        selected_prompts = random.sample(all_prompts, chunk_size)
+        selected_prompts = (
+            db.query(models.Prompt.id).order_by(func.random()).limit(chunk_size).all()
+        )
+        selected_prompt_ids = [p.id for p in selected_prompts]
 
     # Create new chunk
     new_chunk = models.Chunk()
     db.add(new_chunk)
     db.flush()  # Get the chunk ID
 
-    # Add prompts to chunk
-    for prompt in selected_prompts:
-        chunk_prompt = models.ChunkPrompt(
-            chunk_id=new_chunk.id, 
-            prompt_id=prompt.id
-        )
-        db.add(chunk_prompt)
+    # Add prompts to chunk in bulk
+    chunk_prompts = [
+        models.ChunkPrompt(chunk_id=new_chunk.id, prompt_id=prompt_id)
+        for prompt_id in selected_prompt_ids
+    ]
+    db.add_all(chunk_prompts)
 
     db.commit()
     return new_chunk
@@ -186,16 +189,13 @@ def next_prompt(session_id: str, db: Session = Depends(get_db)):
     prompt = random.choice(unvoted_prompts)
 
     # Get all images for this prompt (should be 5)
-    images = (
-        db.query(models.Image)
-        .filter(models.Image.prompt_id == prompt.id)
-        .all()
-    )
+    # Using eager loading would be better, but since we filter by prompt_id, this is already efficient
+    images = db.query(models.Image).filter(models.Image.prompt_id == prompt.id).all()
 
     if len(images) != 5:
         raise HTTPException(
-            status_code=500, 
-            detail=f"Prompt {prompt.id} has {len(images)} images, expected 5"
+            status_code=500,
+            detail=f"Prompt {prompt.id} has {len(images)} images, expected 5",
         )
 
     # Randomize image order to avoid position bias
@@ -241,7 +241,9 @@ def cast_vote(vote: schemas.VoteCreate, db: Session = Depends(get_db)):
     try:
         winner_enum = models.Winner(vote.winner_model)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid winner_model enum value: {e}")
+        raise HTTPException(
+            status_code=400, detail=f"Invalid winner_model enum value: {e}"
+        )
 
     # Validate prompt exists
     prompt = db.query(models.Prompt).filter(models.Prompt.id == vote.prompt_id).first()
@@ -266,7 +268,8 @@ def cast_vote(vote: schemas.VoteCreate, db: Session = Depends(get_db)):
         # Check if it's a unique constraint violation
         if "unique constraint" in str(e).lower() or "duplicate" in str(e).lower():
             raise HTTPException(
-                status_code=409, detail="Vote already exists for this session and prompt"
+                status_code=409,
+                detail="Vote already exists for this session and prompt",
             )
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
