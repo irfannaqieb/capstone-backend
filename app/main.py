@@ -250,28 +250,34 @@ def cast_vote(vote: schemas.VoteCreate, db: Session = Depends(get_db)):
     if not prompt:
         raise HTTPException(status_code=404, detail="Prompt not found")
 
-    # Create vote object
-    db_vote = models.Vote(
-        user_session_id=session_uuid,
-        prompt_id=vote.prompt_id,
-        winner_model=winner_enum,
-        reaction_time_ms=vote.reaction_time_ms,
+    # Check if vote already exists (UPSERT logic)
+    existing_vote = (
+        db.query(models.Vote)
+        .filter(
+            models.Vote.user_session_id == session_uuid,
+            models.Vote.prompt_id == vote.prompt_id,
+        )
+        .first()
     )
 
-    # Handle unique constraint violation gracefully
-    try:
+    if existing_vote:
+        # Update existing vote
+        existing_vote.winner_model = winner_enum
+        existing_vote.reaction_time_ms = vote.reaction_time_ms
+        existing_vote.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        return {"ok": True, "updated": True}
+    else:
+        # Create new vote
+        db_vote = models.Vote(
+            user_session_id=session_uuid,
+            prompt_id=vote.prompt_id,
+            winner_model=winner_enum,
+            reaction_time_ms=vote.reaction_time_ms,
+        )
         db.add(db_vote)
         db.commit()
-        return {"ok": True}
-    except Exception as e:
-        db.rollback()
-        # Check if it's a unique constraint violation
-        if "unique constraint" in str(e).lower() or "duplicate" in str(e).lower():
-            raise HTTPException(
-                status_code=409,
-                detail="Vote already exists for this session and prompt",
-            )
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        return {"ok": True, "updated": False}
 
 
 @app.get("/session/{session_id}/status", response_model=schemas.SessionStatusResponse)

@@ -129,10 +129,13 @@ class Vote(Base):
     winner_model = Column(Enum(Winner), nullable=False)
     reaction_time_ms = Column(Integer)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     session = relationship("Session", back_populates="votes")
     prompt = relationship("Prompt")
 
     __table_args__ = (
-        UniqueConstraint("user_session_id", "prompt_id", name="uq_votes_session_prompt"),
+        UniqueConstraint(
+            "user_session_id", "prompt_id", name="uq_votes_session_prompt"
+        ),
     )
