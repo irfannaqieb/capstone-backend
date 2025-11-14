@@ -68,43 +68,60 @@ def health():
     return {"ok": True}
 
 
-def create_random_chunk(db: Session, chunk_size: int = 30):
-    """Create a new chunk with randomly selected prompts"""
+def assign_chunk_to_session(db: Session) -> models.Chunk:
+    """
+    Assign a chunk to a new session with the following priority:
+    1. Prioritize chunks with 0 completed sessions
+    2. If all chunks have completed sessions, randomly assign any chunk
+    """
 
-    # Get total count first
-    total_count = db.query(func.count(models.Prompt.id)).scalar()
-
-    if total_count <= chunk_size:
-        # If we have fewer prompts than chunk size, use all available prompts
-        selected_prompt_ids = [p.id for p in db.query(models.Prompt.id).all()]
-    else:
-        selected_prompts = (
-            db.query(models.Prompt.id).order_by(func.random()).limit(chunk_size).all()
+    # Get all chunks with their completed session counts
+    chunk_completion_query = (
+        db.query(
+            models.Chunk.id, func.count(models.Session.id).label("completed_count")
         )
-        selected_prompt_ids = [p.id for p in selected_prompts]
+        .outerjoin(
+            models.Session,
+            (models.Session.chunk_id == models.Chunk.id)
+            & (models.Session.status == models.SessionStatus.completed),
+        )
+        .group_by(models.Chunk.id)
+        .all()
+    )
 
-    # Create new chunk
-    new_chunk = models.Chunk()
-    db.add(new_chunk)
-    db.flush()  # Get the chunk ID
+    if not chunk_completion_query:
+        raise HTTPException(
+            status_code=500,
+            detail="No chunks available. Please run migrations to create chunks.",
+        )
 
-    # Add prompts to chunk in bulk
-    chunk_prompts = [
-        models.ChunkPrompt(chunk_id=new_chunk.id, prompt_id=prompt_id)
-        for prompt_id in selected_prompt_ids
+    # Separate chunks by completion status
+    unvoted_chunks = [
+        chunk_id for chunk_id, count in chunk_completion_query if count == 0
     ]
-    db.add_all(chunk_prompts)
 
-    db.commit()
-    return new_chunk
+    # Choose chunk based on priority
+    if unvoted_chunks:
+        # Priority: assign from unvoted chunks
+        selected_chunk_id = random.choice(unvoted_chunks)
+        print(f"Assigned unvoted chunk (0 completed sessions): {selected_chunk_id}")
+    else:
+        # Fallback: all chunks have at least 1 completion, pick randomly
+        all_chunk_ids = [chunk_id for chunk_id, _ in chunk_completion_query]
+        selected_chunk_id = random.choice(all_chunk_ids)
+        print(f"All chunks voted, randomly assigned chunk: {selected_chunk_id}")
+
+    # Fetch and return the selected chunk
+    chunk = db.query(models.Chunk).filter(models.Chunk.id == selected_chunk_id).first()
+    return chunk
 
 
 @app.post("/session/start", response_model=schemas.SessionCreateResponse)
 def start_session(db: Session = Depends(get_db)):
     sid = uuid.uuid4()
 
-    # Create a random chunk for this session
-    chunk = create_random_chunk(db)
+    # Assign a chunk to this session (prioritize unvoted chunks)
+    chunk = assign_chunk_to_session(db)
 
     # Create session with chunk assignment
     new_session = models.Session(
