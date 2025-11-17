@@ -46,3 +46,43 @@ class PromptOut(BaseModel):
     index: Optional[int] = None  # Current progress (e.g., 15/30)
     total: Optional[int] = None  # Total prompts in chunk (30)
     chunk_id: Optional[str] = None
+
+
+# ---------- ADMIN ----------
+class ChunkStats(BaseModel):
+    chunk_id: str
+    completed_sessions: int
+    total_votes: int
+    meets_goal: bool  # True if completed_sessions >= 10
+
+    class Config:
+        from_attributes = True
+
+
+class ImageStats(BaseModel):
+    image_id: str
+    model: str
+    prompt_id: str
+    vote_count: int
+
+    class Config:
+        from_attributes = True
+
+
+class SessionStatusCounts(BaseModel):
+    active: int
+    completed: int
+    abandoned: int
+    total: int
+
+    class Config:
+        from_attributes = True
+
+
+class AdminSummaryResponse(BaseModel):
+    chunks: list[ChunkStats]
+    images: list[ImageStats]
+    sessions: SessionStatusCounts
+
+    class Config:
+        from_attributes = True

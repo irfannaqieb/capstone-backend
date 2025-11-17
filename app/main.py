@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from . import models, schemas
@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import uuid
 import random
+import os
 from datetime import datetime, timedelta, timezone
 
 app = FastAPI()
@@ -30,6 +31,18 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def verify_admin_token(x_admin_token: str = Header(...)):
+    """Verify admin token from header"""
+    admin_token = os.getenv("ADMIN_TOKEN")
+    if not admin_token:
+        raise HTTPException(
+            status_code=500, detail="Admin token not configured on server"
+        )
+    if x_admin_token != admin_token:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+    return True
 
 
 def update_session_activity(session: models.Session, db: Session):
@@ -338,4 +351,90 @@ def get_session_status(session_id: str, db: Session = Depends(get_db)):
         total_votes=vote_count,
         total_prompts=total_prompts,
         chunk_id=str(session.chunk_id),
+    )
+
+
+@app.get("/admin/summary", response_model=schemas.AdminSummaryResponse)
+def get_admin_summary(
+    db: Session = Depends(get_db), _admin: bool = Depends(verify_admin_token)
+):
+    """
+    Admin-only endpoint to get voting analytics summary.
+    Requires X-Admin-Token header.
+    """
+
+    # 1. Get chunk statistics (completed sessions and total votes per chunk)
+    chunk_stats_query = (
+        db.query(
+            models.Chunk.id.label("chunk_id"),
+            func.count(
+                func.distinct(
+                    func.case(
+                        (
+                            models.Session.status == models.SessionStatus.completed,
+                            models.Session.id,
+                        ),
+                        else_=None,
+                    )
+                )
+            ).label("completed_sessions"),
+            func.count(models.Vote.id).label("total_votes"),
+        )
+        .outerjoin(models.Session, models.Session.chunk_id == models.Chunk.id)
+        .outerjoin(models.Vote, models.Vote.user_session_id == models.Session.id)
+        .group_by(models.Chunk.id)
+        .all()
+    )
+
+    chunk_stats = [
+        schemas.ChunkStats(
+            chunk_id=str(row.chunk_id),
+            completed_sessions=row.completed_sessions,
+            total_votes=row.total_votes,
+            meets_goal=row.completed_sessions >= 10,
+        )
+        for row in chunk_stats_query
+    ]
+
+    # 2. Get image statistics (vote count per image)
+    image_stats_query = (
+        db.query(
+            models.Image.id.label("image_id"),
+            models.Image.model.label("model"),
+            models.Image.prompt_id.label("prompt_id"),
+            func.count(models.Vote.id).label("vote_count"),
+        )
+        .outerjoin(models.Vote, models.Vote.prompt_id == models.Image.prompt_id)
+        .group_by(models.Image.id, models.Image.model, models.Image.prompt_id)
+        .all()
+    )
+
+    image_stats = [
+        schemas.ImageStats(
+            image_id=str(row.image_id),
+            model=row.model.value,
+            prompt_id=row.prompt_id,
+            vote_count=row.vote_count,
+        )
+        for row in image_stats_query
+    ]
+
+    # 3. Get session status counts
+    session_counts_query = (
+        db.query(models.Session.status, func.count(models.Session.id).label("count"))
+        .group_by(models.Session.status)
+        .all()
+    )
+
+    session_counts_dict = {row.status.value: row.count for row in session_counts_query}
+
+    session_status_counts = schemas.SessionStatusCounts(
+        active=session_counts_dict.get("active", 0),
+        completed=session_counts_dict.get("completed", 0),
+        abandoned=session_counts_dict.get("abandoned", 0),
+        total=sum(session_counts_dict.values()),
+    )
+
+    return schemas.AdminSummaryResponse(
+        chunks=chunk_stats, images=image_stats, sessions=session_status_counts
     )
