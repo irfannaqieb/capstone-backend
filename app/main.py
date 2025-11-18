@@ -84,9 +84,11 @@ def health():
 def assign_chunk_to_session(db: Session) -> models.Chunk:
     """
     Assign a chunk to a new session with the following priority:
-    1. Prioritize chunks with 0 completed sessions
-    2. If all chunks have completed sessions, randomly assign any chunk
+    1. Prioritize chunks with fewer completed sessions (goal: 10 per chunk)
+    2. Among chunks below goal, select the one with minimum completed sessions
+    3. If all chunks have >= 10 completed sessions, randomly assign any chunk
     """
+    COMPLETION_GOAL = 10
 
     # Get all chunks with their completed session counts
     chunk_completion_query = (
@@ -108,21 +110,35 @@ def assign_chunk_to_session(db: Session) -> models.Chunk:
             detail="No chunks available. Please run migrations to create chunks.",
         )
 
-    # Separate chunks by completion status
-    unvoted_chunks = [
-        chunk_id for chunk_id, count in chunk_completion_query if count == 0
+    # Separate chunks by completion status relative to goal
+    chunks_below_goal = [
+        (chunk_id, count)
+        for chunk_id, count in chunk_completion_query
+        if count < COMPLETION_GOAL
     ]
 
     # Choose chunk based on priority
-    if unvoted_chunks:
-        # Priority: assign from unvoted chunks
-        selected_chunk_id = random.choice(unvoted_chunks)
-        print(f"Assigned unvoted chunk (0 completed sessions): {selected_chunk_id}")
+    if chunks_below_goal:
+        # Find the minimum completed count among chunks below goal
+        min_completed = min(count for _, count in chunks_below_goal)
+
+        # Get all chunks with this minimum count
+        chunks_with_min = [
+            chunk_id for chunk_id, count in chunks_below_goal if count == min_completed
+        ]
+
+        # Randomly select one of the chunks with minimum completed sessions
+        selected_chunk_id = random.choice(chunks_with_min)
+        print(
+            f"Assigned chunk with min completed sessions (goal: {COMPLETION_GOAL}): chunk_id={selected_chunk_id}, completed={min_completed}"
+        )
     else:
-        # Fallback: all chunks have at least 1 completion, pick randomly
+        # Fallback: all chunks have >= COMPLETION_GOAL completions, pick randomly
         all_chunk_ids = [chunk_id for chunk_id, _ in chunk_completion_query]
         selected_chunk_id = random.choice(all_chunk_ids)
-        print(f"All chunks voted, randomly assigned chunk: {selected_chunk_id}")
+        print(
+            f"All chunks met goal ({COMPLETION_GOAL}+), randomly assigned chunk: {selected_chunk_id}"
+        )
 
     # Fetch and return the selected chunk
     chunk = db.query(models.Chunk).filter(models.Chunk.id == selected_chunk_id).first()
