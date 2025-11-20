@@ -86,3 +86,18 @@ class AdminSummaryResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ---------- PUBLIC RESULTS ----------
+class ModelResult(BaseModel):
+    model_id: str
+    display_name: str
+    wins: int
+    win_percentage: float
+
+
+class ResultsResponse(BaseModel):
+    total_votes: int
+    total_decisive_votes: int
+    tie_votes: int
+    models: list[ModelResult]

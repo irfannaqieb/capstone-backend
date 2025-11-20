@@ -454,3 +454,71 @@ def get_admin_summary(
     return schemas.AdminSummaryResponse(
         chunks=chunk_stats, images=image_stats, sessions=session_status_counts
     )
+
+
+@app.get("/results", response_model=schemas.ResultsResponse)
+def get_results(db: Session = Depends(get_db)):
+    """
+    Public endpoint returning global aggregate voting results.
+
+    Aggregates all votes to compute how often each model wins,
+    excluding ties from the percentage denominator.
+    """
+
+    # Total votes (including ties)
+    total_votes = db.query(func.count(models.Vote.id)).scalar() or 0
+
+    # Tie votes
+    tie_votes = (
+        db.query(func.count(models.Vote.id))
+        .filter(models.Vote.winner_model == models.Winner.tie)
+        .scalar()
+        or 0
+    )
+
+    # Wins per model (excluding ties)
+    win_counts_query = (
+        db.query(
+            models.Vote.winner_model,
+            func.count(models.Vote.id).label("count"),
+        )
+        .filter(models.Vote.winner_model != models.Winner.tie)
+        .group_by(models.Vote.winner_model)
+        .all()
+    )
+
+    win_counts = {row.winner_model.value: row.count for row in win_counts_query}
+
+    total_decisive_votes = sum(win_counts.values())
+
+    model_results: list[schemas.ModelResult] = []
+
+    for winner in models.Winner:
+        if winner == models.Winner.tie:
+            continue
+
+        model_id = winner.value
+        wins = win_counts.get(model_id, 0)
+
+        if total_decisive_votes > 0:
+            win_percentage = wins / total_decisive_votes * 100
+        else:
+            win_percentage = 0.0
+
+        display_name = models.MODEL_DISPLAY.get(model_id, model_id)
+
+        model_results.append(
+            schemas.ModelResult(
+                model_id=model_id,
+                display_name=display_name,
+                wins=wins,
+                win_percentage=win_percentage,
+            )
+        )
+
+    return schemas.ResultsResponse(
+        total_votes=total_votes,
+        total_decisive_votes=total_decisive_votes,
+        tie_votes=tie_votes,
+        models=model_results,
+    )
