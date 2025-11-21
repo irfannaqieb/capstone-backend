@@ -101,3 +101,18 @@ class ResultsResponse(BaseModel):
     total_decisive_votes: int
     tie_votes: int
     models: list[ModelResult]
+
+
+class PromptResult(BaseModel):
+    prompt_id: str
+    prompt_text: str
+    images: list[ImageOut]
+    total_votes: int
+    tie_votes: int
+    models: list[ModelResult]
+    winning_model_id: Optional[str] = None
+    winning_image_id: Optional[str] = None
+
+
+class PromptResultsResponse(BaseModel):
+    prompts: list[PromptResult]

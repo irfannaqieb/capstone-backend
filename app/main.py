@@ -9,6 +9,7 @@ import uuid
 import random
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 app = FastAPI()
 
@@ -522,3 +523,138 @@ def get_results(db: Session = Depends(get_db)):
         tie_votes=tie_votes,
         models=model_results,
     )
+
+
+@app.get("/results/prompts", response_model=schemas.PromptResultsResponse)
+def get_prompt_results(db: Session = Depends(get_db)):
+    """
+    Public endpoint returning per-prompt voting results.
+    
+    For each prompt, returns:
+    - Prompt text and ID
+    - All 5 images (one per model)
+    - Vote counts and percentages per model
+    - Total votes and tie votes
+    - Winning model and winning image ID
+    """
+    
+    # Get all prompts
+    all_prompts = db.query(models.Prompt).order_by(models.Prompt.id).all()
+    
+    # Get all images and group by prompt_id
+    all_images = db.query(models.Image).all()
+    images_by_prompt: dict[str, list[models.Image]] = {}
+    for image in all_images:
+        if image.prompt_id not in images_by_prompt:
+            images_by_prompt[image.prompt_id] = []
+        images_by_prompt[image.prompt_id].append(image)
+    
+    # Get vote counts per prompt and per model
+    vote_counts_query = (
+        db.query(
+            models.Vote.prompt_id,
+            models.Vote.winner_model,
+            func.count(models.Vote.id).label("count"),
+        )
+        .group_by(models.Vote.prompt_id, models.Vote.winner_model)
+        .all()
+    )
+    
+    # Build vote data structure: prompt_id -> {winner_model: count}
+    votes_by_prompt: dict[str, dict[str, int]] = {}
+    for prompt_id, winner_model, count in vote_counts_query:
+        if prompt_id not in votes_by_prompt:
+            votes_by_prompt[prompt_id] = {}
+        votes_by_prompt[prompt_id][winner_model.value] = count
+    
+    # Build results for each prompt
+    prompt_results: list[schemas.PromptResult] = []
+    
+    for prompt in all_prompts:
+        prompt_id = prompt.id
+        
+        # Get images for this prompt
+        prompt_images = images_by_prompt.get(prompt_id, [])
+        image_outs = [
+            schemas.ImageOut(
+                image_id=str(img.id),
+                url=img.url,
+                model=img.model.value,
+            )
+            for img in prompt_images
+        ]
+        
+        # Get vote data for this prompt
+        prompt_votes = votes_by_prompt.get(prompt_id, {})
+        total_votes = sum(prompt_votes.values())
+        tie_votes = prompt_votes.get(models.Winner.tie.value, 0)
+        
+        # Calculate wins per model (excluding ties)
+        model_wins: dict[str, int] = {}
+        for winner in models.Winner:
+            if winner != models.Winner.tie:
+                model_id = winner.value
+                model_wins[model_id] = prompt_votes.get(model_id, 0)
+        
+        total_decisive_votes = sum(model_wins.values())
+        
+        # Build ModelResult list for this prompt
+        model_results: list[schemas.ModelResult] = []
+        for winner in models.Winner:
+            if winner == models.Winner.tie:
+                continue
+            
+            model_id = winner.value
+            wins = model_wins.get(model_id, 0)
+            
+            if total_decisive_votes > 0:
+                win_percentage = wins / total_decisive_votes * 100
+            else:
+                win_percentage = 0.0
+            
+            display_name = models.MODEL_DISPLAY.get(model_id, model_id)
+            
+            model_results.append(
+                schemas.ModelResult(
+                    model_id=model_id,
+                    display_name=display_name,
+                    wins=wins,
+                    win_percentage=win_percentage,
+                )
+            )
+        
+        # Determine winning model (non-tie model with highest wins)
+        winning_model_id: Optional[str] = None
+        winning_image_id: Optional[str] = None
+        
+        if total_decisive_votes > 0 and len(model_wins) > 0:
+            # Find model with maximum wins
+            max_wins = max(model_wins.values())
+            winning_models = [
+                model_id for model_id, wins in model_wins.items() if wins == max_wins
+            ]
+            
+            # If there's a clear winner (not a tie), use it
+            if len(winning_models) == 1:
+                winning_model_id = winning_models[0]
+                
+                # Find the corresponding image for the winning model
+                for img in prompt_images:
+                    if img.model.value == winning_model_id:
+                        winning_image_id = str(img.id)
+                        break
+        
+        prompt_results.append(
+            schemas.PromptResult(
+                prompt_id=prompt_id,
+                prompt_text=prompt.text,
+                images=image_outs,
+                total_votes=total_votes,
+                tie_votes=tie_votes,
+                models=model_results,
+                winning_model_id=winning_model_id,
+                winning_image_id=winning_image_id,
+            )
+        )
+    
+    return schemas.PromptResultsResponse(prompts=prompt_results)
